@@ -1,0 +1,128 @@
+from urllib3.contrib import pyopenssl as reqs
+import boto3 
+import time
+import ssl
+import socket
+import threading
+                         
+#将所有子域名的数量分成10份
+#divide all the subdomain into ten segment
+def list_of_groups(init_list, children_list_len):    
+    list_of_groups = zip(*(iter(init_list),) *children_list_len)    
+    end_list = [list(i) for i in list_of_groups]    
+    count = len(init_list)
+    end_list.append(init_list[-count:]) if count !=0 else end_list    
+    return end_list
+
+
+def add_err_domain(ip_hostname,domain_list,sub_domains,all_domains,length_list_domain,null_domain,null_sub_domain):
+    for length_list_subdomain in range(0,len(sub_domains['ResourceRecordSets'])):
+   
+
+        if sub_domains['ResourceRecordSets'][length_list_subdomain]['Type'] == 'A' or sub_domains['ResourceRecordSets'][length_list_subdomain]['Type'] == 'CNAME' :
+            try:
+                  address_domain_ip  = socket.gethostbyname_ex(sub_domains['ResourceRecordSets'][length_list_subdomain]['Name'])[-1]
+            except:
+                address_domain_ip  = socket.gethostbyname_ex(sub_domains['ResourceRecordSets'][length_list_subdomain]['Name'])[-1]
+                ip_hostname.update({sub_domains['ResourceRecordSets'][length_list_subdomain]['Name']:address_domain_ip})
+                domain_list.append(sub_domains['ResourceRecordSets'][length_list_subdomain]['Name'])
+
+        else:
+            pass
+
+
+
+
+#获取所有子域名的列表和子域名对应的ip关系的字典
+#get all the subdomain list and dict of the corresponding relationship of ip and subdomains
+def get_err_domain(aws_access_key_id,aws_secret_access_key,region_name):
+   
+    domain_list = []
+    ip_hostname = {}
+
+    client = boto3.client('route53',aws_access_key_id = aws_access_key_id,aws_secret_access_key = aws_secret_access_key ,region_name = region_name)
+    all_domains = client.list_hosted_zones()
+    
+   
+    global sub_domains_all
+    sub_domains_all = {}
+    
+    
+    
+    for length_list_domain in range(0,len(all_domains['HostedZones'])):
+
+        HostedZoneId = all_domains['HostedZones'][length_list_domain]['Id']
+
+        sub_domains = client.list_resource_record_sets(HostedZoneId = HostedZoneId)
+        
+     
+        
+        while sub_domains['IsTruncated'] == True:
+            add_err_domain(ip_hostname,domain_list,sub_domains,all_domains,length_list_domain,null_domain,null_sub_domain)
+            sub_domains_all = client.list_resource_record_sets(HostedZoneId = HostedZoneId,StartRecordName = sub_domains['NextRecordName'],StartRecordType = sub_domains['NextRecordType'])
+            
+            sub_domains = sub_domains_all
+               
+        else:
+            
+            add_err_domain(ip_hostname,domain_list,sub_domains,all_domains,length_list_domain,null_domain,null_sub_domain)    
+
+
+
+    small_data = list_of_groups(domain_list,262)[:-1]
+
+    return small_data,ip_hostname
+
+#获取子域名绑定的证书中的主域名和主域名有差别的子域名
+#get errdomain
+def get_subject(small_data,ip_hostname):
+    global err_domain_list
+    err_domain_list = []
+ 
+    mutex = threading.Lock()
+    
+   
+    for i in small_data:
+        hostname = i
+        hostname = str(hostname)
+        ip = ip_hostname[hostname]
+        for address_domain in ip:
+            conn = ssl.create_default_context()   
+            context = ssl.SSLContext(ssl.PROTOCOL_TLSv1_2)
+            print(hostname)
+            print(address_domain)
+            try:
+                with socket.create_connection((address_domain,443)) as sock:
+                    with context.wrap_socket(sock,server_hostname = hostname) as ssock:
+                    
+                        if  sock:
+                            
+                            certificate = ssl.DER_cert_to_PEM_cert(ssock.getpeercert(True))
+                            x509 = reqs.OpenSSL.crypto.load_certificate(reqs.OpenSSL.crypto.FILETYPE_PEM,certificate)
+                            sub_cn = x509.get_subject().CN
+                            root_cn = '*.' + '.'.join(hostname.split('.')[1:-1])
+                            
+                            print('sub_cn: ',sub_cn)
+                            print('root_cn: ',root_cn)
+                            if sub_cn != root_cn:
+                                mutex.acquire()
+                                err_domain_list.append(hostname)
+                                mutex.release()
+                                print('err_domain ',err_domain_list)
+            except:
+                pass
+
+
+
+
+
+
+#开10个子线程去跑主程序
+if __name__ == "__main__":
+    small_data,ip_hostname = get_err_domain(aws_access_key_id,aws_secret_access_key,region_name)
+    for i in small_data:
+        t = threading.Thread(target = get_subject,args = (i,ip_hostname))
+        t.start()
+        time.sleep(1)
+    for i in small_data:
+        t.join(timeout = 3)
